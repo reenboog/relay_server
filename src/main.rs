@@ -3,17 +3,89 @@ use std::{
 	io::{Read, Write},
 	net::{TcpListener, TcpStream},
 	thread,
-	time::Duration,
+	time::Duration, sync::{mpsc, Arc, Mutex},
 };
 
+struct Worker {
+	id: usize,
+	handle: thread::JoinHandle<()>
+}
+
+impl Worker {
+	fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
+		Self {
+			id,
+			handle: thread::spawn(move || {
+				// Acquiring a lock might fail if the mutex is in a poisoned state, which can happen if some 
+				// other thread panicked while holding the lock rather than releasing the lock. In this situation, 
+				// calling unwrap to have this thread panic is the correct action to take
+
+				// The call to recv blocks, so if there is no job yet, the current thread will wait until a 
+				// job becomes available. The Mutex<T> ensures that only one Worker thread at a time is trying to request a job.
+				while let Ok(job) = receiver.lock().unwrap().recv() {
+					println!("executing job {}", id);
+
+					job();
+				}
+			})
+		}
+	}
+}
+
+struct ThreadPool {
+	workers: Vec<Worker>,
+	sender: mpsc::Sender<Job>
+}
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+impl ThreadPool {
+	/// Creates a new ThreadPool.
+	///
+	/// The size is the number of threads in the pool.
+	///
+	/// # Panics
+	///
+	/// The `new` function will panic if the size is zero.
+	pub fn new(size: usize) -> Self {
+		assert!(size > 0);
+
+		let mut workers = Vec::with_capacity(size);
+		let (tx, rx) = mpsc::channel();
+
+		let receiver = Arc::new(Mutex::new(rx));
+
+		for i in 0..size {
+			workers.push(Worker::new(i, Arc::clone(&receiver)));
+		}
+
+		Self {
+			workers,
+			sender: tx 
+		}
+	}
+
+	pub fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static {
+		let job = Box::new(f);
+
+		self.sender.send(job).unwrap();
+	}
+}
+
 fn main() {
+	// 1 thread pool: idle threads waiting
+	// 2 incoming requests queue: when a thread is available, pop
+
 	// connecting to a port is caleld binding
 	let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
+	let pool = ThreadPool::new(4);
 
 	for stream in listener.incoming() {
 		let mut stream = stream.unwrap();
 
-		handle_connection(&mut stream);
+		pool.execute(move || {
+			handle_connection(&mut stream);
+		});
 	}
 }
 
