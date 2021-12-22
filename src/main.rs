@@ -12,7 +12,7 @@ struct Worker {
 }
 
 impl Worker {
-	fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
+	fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) -> Self {
 		Self {
 			id,
 			thread: Some(thread::spawn(move || loop {
@@ -24,10 +24,18 @@ impl Worker {
 				// job becomes available. The Mutex<T> ensures that only one Worker thread at a time is trying to request a job.
 
 				// This is a scope-based mutex that locks for as long as the variable lives
-				let job = receiver.lock().unwrap().recv().unwrap(); 
-				println!("executing job {}", id);
+				match receiver.lock().unwrap().recv().unwrap() {
+					Message::NewJob(job) => {
+						println!("executing job {}", id);
 
-				job();
+						job();
+					},
+					Message::Terminate => {
+						println!("Received Terminate for {}", id);
+
+						break;
+					}
+				}
 			}))
 		}
 	}
@@ -35,13 +43,30 @@ impl Worker {
 
 struct ThreadPool {
 	workers: Vec<Worker>,
-	sender: mpsc::Sender<Job>
+	sender: mpsc::Sender<Message>
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+enum Message {
+	NewJob(Job),
+	Terminate
+}
+
 impl Drop for ThreadPool {
 	fn drop(&mut self) {
+		println!("Sending Terminate to all workers");
+
+		// we need two loops to avoid deadlocks
+		// If we used a single loop to iterate through each worker, on the first iteration a terminate 
+		// message would be sent down the channel and join called on the first worker’s thread. If that 
+		// first worker was busy processing a request at that moment, the second worker would pick up the 
+		// terminate message from the channel and shut down. We would be left waiting on the first worker 
+		// to shut down, but it never would because the second thread picked up the terminate message. Deadlock!
+		for _ in &self.workers {
+			self.sender.send(Message::Terminate).unwrap();
+		}
+
 		for worker in &mut self.workers {
 			println!("Shutting down worker {}", worker.id);
 
@@ -81,7 +106,7 @@ impl ThreadPool {
 	pub fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static {
 		let job = Box::new(f);
 
-		self.sender.send(job).unwrap();
+		self.sender.send(Message::NewJob(job)).unwrap();
 	}
 }
 
