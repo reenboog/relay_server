@@ -8,26 +8,27 @@ use std::{
 
 struct Worker {
 	id: usize,
-	handle: thread::JoinHandle<()>
+	thread: Option<thread::JoinHandle<()>>
 }
 
 impl Worker {
 	fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
 		Self {
 			id,
-			handle: thread::spawn(move || {
+			thread: Some(thread::spawn(move || loop {
 				// Acquiring a lock might fail if the mutex is in a poisoned state, which can happen if some 
 				// other thread panicked while holding the lock rather than releasing the lock. In this situation, 
 				// calling unwrap to have this thread panic is the correct action to take
 
 				// The call to recv blocks, so if there is no job yet, the current thread will wait until a 
 				// job becomes available. The Mutex<T> ensures that only one Worker thread at a time is trying to request a job.
-				while let Ok(job) = receiver.lock().unwrap().recv() {
-					println!("executing job {}", id);
 
-					job();
-				}
-			})
+				// This is a scope-based mutex that locks for as long as the variable lives
+				let job = receiver.lock().unwrap().recv().unwrap(); 
+				println!("executing job {}", id);
+
+				job();
+			}))
 		}
 	}
 }
@@ -38,6 +39,18 @@ struct ThreadPool {
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
+
+impl Drop for ThreadPool {
+	fn drop(&mut self) {
+		for worker in &mut self.workers {
+			println!("Shutting down worker {}", worker.id);
+
+			if let Some(thread) = worker.thread.take() {
+				thread.join().unwrap();
+			}
+		}
+	}
+}
 
 impl ThreadPool {
 	/// Creates a new ThreadPool.
