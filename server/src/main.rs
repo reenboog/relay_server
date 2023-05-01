@@ -1,5 +1,5 @@
 use shared::{serde_json, Message};
-use tokio::time::Instant;
+use tokio::time::{self, Instant};
 
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,14 +35,14 @@ async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dy
 		}
 	});
 
-	let mut interval = tokio::time::interval(Duration::from_secs(6));
+	let mut ping_interval = tokio::time::interval(Duration::from_secs(6));
 	let mut last_ping_received = Instant::now();
 
 	loop {
 		let mut buffer = [0; 1024];
 
 		tokio::select! {
-			_ = interval.tick() => {
+			_ = ping_interval.tick() => {
 				if last_ping_received.elapsed() >= Duration::from_secs(6) {
 					eprintln!("Client {} did not send a Ping within 5 seconds, disconnecting.", client_id);
 
@@ -104,26 +104,27 @@ async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dy
 
 	// Send a Left message to all other clients
 	for (cid, client_tx) in clients.lock().await.iter() {
-			if client_id != *cid {
-					if let Err(e) = client_tx.send(Message::Left { id: client_id.clone() }) {
-							eprintln!("Error sending Left message to the writer task: {:?}", e);
-					}
+		if client_id != *cid {
+			if let Err(e) = client_tx.send(Message::Left {
+				id: client_id.clone(),
+			}) {
+				eprintln!("Error sending Left message to the writer task: {:?}", e);
 			}
+		}
 	}
 
 	Ok(())
 }
 
-pub async fn run_server(addr: &str) -> Result<(), Box<dyn Error>> {
+pub async fn run_server(clients: Clients, addr: &str) -> Result<(), Box<dyn Error>> {
 	let listener = TcpListener::bind(addr).await?;
 
 	println!("Server is listening on {}", addr);
 
-	let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
-
 	loop {
 		let (stream, _) = listener.accept().await?;
 		let clients = clients.clone();
+
 		tokio::spawn(async move {
 			if let Err(e) = handle_client(clients, stream).await {
 				eprintln!("Error handling client: {:?}", e);
@@ -135,12 +136,28 @@ pub async fn run_server(addr: &str) -> Result<(), Box<dyn Error>> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 	let addr = "127.0.0.1:8080";
+	let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
 
+	let cs = clients.clone();
 	let server = tokio::spawn(async move {
-		run_server(addr).await.unwrap();
+		run_server(cs, addr).await.unwrap();
 	});
 
-	_ = tokio::join!(server);
+	let status_watchdog = tokio::spawn(async move {
+		loop {
+			for (_, client_tx) in clients.lock().await.iter() {
+				if let Err(e) = client_tx.send(Message::Status {
+					ctx: "up".to_string(),
+				}) {
+					eprintln!("Error sending Left message to the writer task: {:?}", e);
+				}
+			}
+
+			time::sleep(Duration::from_secs(10)).await;
+		}
+	});
+
+	_ = tokio::join!(server, status_watchdog);
 
 	Ok(())
 }

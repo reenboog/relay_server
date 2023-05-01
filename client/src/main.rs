@@ -66,6 +66,9 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 					Message::Pong => {
 						println!("Pong");
 					}
+					Message::Status { ctx: _ } => {
+						println!("Up");
+					}
 					_ => (),
 				}
 			}
