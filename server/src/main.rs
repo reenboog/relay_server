@@ -133,6 +133,20 @@ pub async fn run_server(clients: Clients, addr: &str) -> Result<(), Box<dyn Erro
 	}
 }
 
+pub async fn run_status_watchdog(clients: Clients) -> Result<(), Box<dyn Error>> {
+	loop {
+		for (_, client_tx) in clients.lock().await.iter() {
+			if let Err(e) = client_tx.send(Message::Status {
+				ctx: "up".to_string(),
+			}) {
+				eprintln!("Error sending Left message to the writer task: {:?}", e);
+			}
+		}
+
+		time::sleep(Duration::from_secs(10)).await;
+	}
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 	let addr = "127.0.0.1:8080";
@@ -144,17 +158,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 	});
 
 	let status_watchdog = tokio::spawn(async move {
-		loop {
-			for (_, client_tx) in clients.lock().await.iter() {
-				if let Err(e) = client_tx.send(Message::Status {
-					ctx: "up".to_string(),
-				}) {
-					eprintln!("Error sending Left message to the writer task: {:?}", e);
-				}
-			}
-
-			time::sleep(Duration::from_secs(10)).await;
-		}
+		run_status_watchdog(clients).await.unwrap();
 	});
 
 	_ = tokio::join!(server, status_watchdog);
