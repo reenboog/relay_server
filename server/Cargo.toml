@@ -6,5 +6,6 @@ author = "Alex Gievsky"
 
 [dependencies]
 shared = { path = "../shared" }
-
+rand = { version = "0.8.5" }
+rand-07 = { package = "rand", version = "0.7.0" }
 tokio = { version = "1.13", features = ["full"] }

@@ -12,6 +12,9 @@ use tokio::sync::Mutex;
 
 use tokio::time::Duration;
 
+mod clients;
+mod database;
+
 #[derive(Clone, Debug)]
 struct MsgToSend(Vec<u8>);
 type Clients = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>>;
@@ -19,11 +22,8 @@ type Clients = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>>;
 use tokio::sync::mpsc;
 
 async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dyn Error>> {
-	let mut buffer = [0; 1024];
 	let mut client_id = String::new();
-
 	let (tx, mut rx) = mpsc::unbounded_channel();
-
 	let (mut stream_read, mut stream_write) = stream.into_split();
 
 	let writer_task = tokio::spawn(async move {
@@ -42,95 +42,81 @@ async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dy
 		let mut buffer = [0; 1024];
 
 		tokio::select! {
-				_ = interval.tick() => {
-						if last_ping_received.elapsed() >= Duration::from_secs(6) {
-								eprintln!("Client {} did not send a Ping within 5 seconds, disconnecting.", client_id);
+			_ = interval.tick() => {
+				if last_ping_received.elapsed() >= Duration::from_secs(6) {
+					eprintln!("Client {} did not send a Ping within 5 seconds, disconnecting.", client_id);
 
-								let msg = Message::Left { id: client_id.clone() };
-
-				// Send a Left message to all other clients
-				for (id, client_tx) in clients.lock().await.iter() {
-					if id != &client_id {
-						if let Err(e) = client_tx.send(msg.clone()) {
-							eprintln!("Error sending Left message to the writer task: {:?}", e);
-						}
+					break;
+				}
+			}
+			n = stream_read.read(&mut buffer) => {
+				let n = match n {
+					Ok(n) => n,
+					Err(e) => {
+						eprintln!("Error reading from the stream: {:?}", e);
+						break;
 					}
+				};
+
+				if n == 0 {
+					break;
 				}
 
-								break;
+				let message: Message = serde_json::from_slice(&buffer[..n])?;
+				println!("{:?}", message);
+
+				match message {
+						Message::Hello { id } => {
+								client_id = id;
+								clients.lock().await.insert(client_id.clone(), tx.clone());
+
+								println!("all clients: {:?}", clients.lock().await.keys());
 						}
-				}
-				n = stream_read.read(&mut buffer) => {
-						let n = match n {
-								Ok(n) => n,
-								Err(e) => {
-										eprintln!("Error reading from the stream: {:?}", e);
-										break;
+						Message::Ping { .. } => {
+								last_ping_received = Instant::now();
+								let pong_msg = Message::Pong;
+								if let Err(e) = tx.send(pong_msg) {
+										eprintln!("Error sending Pong message to the writer task: {:?}", e);
 								}
-						};
-
-						if n == 0 {
-								break;
 						}
-
-						let message: Message = serde_json::from_slice(&buffer[..n])?;
-						println!("Received message: {:?}", message);
-
-						match message {
-								Message::Hello { id } => {
-										client_id = id;
-										clients.lock().await.insert(client_id.clone(), tx.clone());
-
-										println!("all clients: {:?}", clients.lock().await.keys());
-								}
-								Message::Ping { .. } => {
-										last_ping_received = Instant::now();
-										let pong_msg = Message::Pong;
-										if let Err(e) = tx.send(pong_msg) {
-												eprintln!("Error sending Pong message to the writer task: {:?}", e);
+						Message::Msg { sender, ts, payload, receiver } => {
+								if let Some(receiver_tx) = clients.lock().await.get(&receiver) {
+										let msg = Message::Msg {
+											sender,
+											ts,
+											payload,
+											receiver: receiver.clone(),
+										};
+										if let Err(e) = receiver_tx.send(msg) {
+												eprintln!("Error sending relayed message to the writer task: {:?}", e);
 										}
 								}
-								Message::Msg { payload, receiver } => {
-										if let Some(receiver_tx) = clients.lock().await.get(&receiver) {
-												let msg = Message::Msg {
-														payload: format!("{} | relayed", payload),
-														receiver: receiver.clone(),
-												};
-												if let Err(e) = receiver_tx.send(msg) {
-														eprintln!("Error sending relayed message to the writer task: {:?}", e);
-												}
-										}
-								}
-								Message::Quit { id } => {
-									let msg = Message::Left { id: id.clone() };
-
-									// Send a Left message to all other clients
-									for (client_id, client_tx) in clients.lock().await.iter() {
-											if client_id != &id {
-													if let Err(e) = client_tx.send(msg.clone()) {
-															eprintln!("Error sending Left message to the writer task: {:?}", e);
-													}
-											}
-									}
-
-									break;
-							}
-							_ => (),
 						}
+					_ => (),
 				}
+			}
 		}
 	}
 
 	clients.lock().await.remove(&client_id);
 	drop(tx); // Close the channel to let the writer_task terminate
-
 	writer_task.await?; // Wait for the writer_task to finish
+
+	// Send a Left message to all other clients
+	for (cid, client_tx) in clients.lock().await.iter() {
+			if client_id != *cid {
+					if let Err(e) = client_tx.send(Message::Left { id: client_id.clone() }) {
+							eprintln!("Error sending Left message to the writer task: {:?}", e);
+					}
+			}
+	}
 
 	Ok(())
 }
 
 pub async fn run_server(addr: &str) -> Result<(), Box<dyn Error>> {
 	let listener = TcpListener::bind(addr).await?;
+
 	println!("Server is listening on {}", addr);
 
 	let clients: Clients = Arc::new(Mutex::new(HashMap::new()));

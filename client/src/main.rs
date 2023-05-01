@@ -35,8 +35,9 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 	loop {
 		tokio::select! {
 			_ = interval.tick() => {
-				let ping_msg = Message::Ping { id: client_id.to_string(), ctx: None };
+				let ping_msg = Message::Ping { id: client_id.to_string() };
 				let serialized_ping = serde_json::to_string(&ping_msg)?;
+
 				stream.write_all(serialized_ping.as_bytes()).await?
 			}
 			result = stream.read(&mut buffer) => {
@@ -54,16 +55,16 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 
 				let message: Message = serde_json::from_slice(&buffer[..n])?;
 				match message {
-					Message::Msg { payload, receiver } => {
+					Message::Msg { sender, ts, payload, receiver } => {
 						if receiver == client_id {
-							println!("Received message: {:?}", payload);
+							println!("{}: {} {:?}", sender, ts, payload);
 						}
 					}
 					Message::Left { id } => {
 						println!("{} left", id);
 					}
 					Message::Pong => {
-						println!("\rReceived Pong from the server");
+						println!("Pong");
 					}
 					_ => (),
 				}
@@ -89,7 +90,11 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 					let receiver = line[0].clone();
 					let payload = line[1].clone();
 
-					Message::Msg { payload, receiver }
+					use std::time::{SystemTime, UNIX_EPOCH};
+
+					let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
+
+					Message::Msg { sender: client_id.to_string(), ts, payload, receiver }
 				};
 
 				stream.write_all(serde_json::to_string(&msg)?.as_bytes()).await?;
