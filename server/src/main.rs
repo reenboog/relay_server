@@ -1,3 +1,4 @@
+use database::Database;
 use shared::{serde_json, Message};
 use tokio::time::{self, Instant};
 
@@ -18,10 +19,11 @@ mod database;
 #[derive(Clone, Debug)]
 struct MsgToSend(Vec<u8>);
 type Clients = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>>;
+type DB = Arc<Mutex<Database>>;
 
 use tokio::sync::mpsc;
 
-async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dyn Error>> {
+async fn handle_client(clients: Clients, db: DB, stream: TcpStream) -> Result<(), Box<dyn Error>> {
 	let mut client_id = String::new();
 	let (tx, mut rx) = mpsc::unbounded_channel();
 	let (mut stream_read, mut stream_write) = stream.into_split();
@@ -67,10 +69,23 @@ async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dy
 
 				match message {
 						Message::Hello { id } => {
-								client_id = id;
-								clients.lock().await.insert(client_id.clone(), tx.clone());
+							client_id = id;
+							clients.lock().await.insert(client_id.clone(), tx.clone());
 
-								println!("all clients: {:?}", clients.lock().await.keys());
+							println!("all clients: {:?}", clients.lock().await.keys());
+
+							// TODO: DRY
+							// Send all stored messages to the client if any
+							if let Some(messages) = db.lock().await.get(client_id.clone()).await {
+								for (_, message) in messages {
+										if let Err(e) = tx.send(message.clone()) {
+												eprintln!(
+														"Error sending stored message to the writer task: {:?}",
+														e
+												);
+										}
+								}
+							}
 						}
 						Message::Ping { .. } => {
 								last_ping_received = Instant::now();
@@ -80,17 +95,36 @@ async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dy
 								}
 						}
 						Message::Msg { sender, ts, payload, receiver } => {
-								if let Some(receiver_tx) = clients.lock().await.get(&receiver) {
-										let msg = Message::Msg {
-											sender,
-											ts,
-											payload,
-											receiver: receiver.clone(),
-										};
-										if let Err(e) = receiver_tx.send(msg) {
+							// here, store the message in a db and send ServerAck
+							let msg = Message::Msg {
+								sender,
+								ts,
+								payload,
+								receiver: receiver.clone(),
+							};
+
+							db.lock().await.save(&msg).await?;
+
+							let ack_msg = Message::ServerAck { id: ts };
+
+							if let Err(e) = tx.send(ack_msg) {
+								eprintln!("Error sending ServerAck message to the writer task: {:?}", e);
+							}
+
+							// FIXME: send this message instead?
+							if let Some(receiver_tx) = clients.lock().await.get(&receiver) {
+								// send all messages
+								if let Some(msgs) = db.lock().await.get(client_id.clone()).await {
+									for (_, msg) in msgs {
+										if let Err(e) = receiver_tx.send(msg.clone()) {
 												eprintln!("Error sending relayed message to the writer task: {:?}", e);
 										}
+									}
 								}
+							}
+						}
+						Message::ClientAck { id } => {
+							db.lock().await.remove(client_id.clone(), id).await;
 						}
 					_ => (),
 				}
@@ -118,15 +152,17 @@ async fn handle_client(clients: Clients, stream: TcpStream) -> Result<(), Box<dy
 
 pub async fn run_server(clients: Clients, addr: &str) -> Result<(), Box<dyn Error>> {
 	let listener = TcpListener::bind(addr).await?;
+	let db = Arc::new(Mutex::new(database::Database::new()));
 
 	println!("Server is listening on {}", addr);
 
 	loop {
 		let (stream, _) = listener.accept().await?;
 		let clients = clients.clone();
+		let db = db.clone();
 
 		tokio::spawn(async move {
-			if let Err(e) = handle_client(clients, stream).await {
+			if let Err(e) = handle_client(clients, db, stream).await {
 				eprintln!("Error handling client: {:?}", e);
 			}
 		});
