@@ -6,3 +6,4 @@ author = "Alex Gievsky"
 
 [dependencies]
 shared = { path = "../shared" }
+rand = { version = "0.8.5" }

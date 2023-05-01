@@ -1,4 +1,8 @@
+pub use serde::{Deserialize, Serialize};
+pub use serde_json;
 
-pub fn add_one(x: i32) -> i32 {
-	x + 1
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Message {
+	Hello { id: String },
+	Msg { payload: String },
 }

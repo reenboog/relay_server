@@ -6,3 +6,4 @@ author = "Alex Gievsky"
 
 [dependencies]
 shared = { path = "../shared" }
+serde = { version = "1.0.160" }
