@@ -68,64 +68,64 @@ async fn handle_client(clients: Clients, db: DB, stream: TcpStream) -> Result<()
 				println!("{:?}", message);
 
 				match message {
-						Message::Hello { id } => {
-							client_id = id;
-							clients.lock().await.insert(client_id.clone(), tx.clone());
+					Message::Hello { id } => {
+						client_id = id;
+						clients.lock().await.insert(client_id.clone(), tx.clone());
 
-							println!("all clients: {:?}", clients.lock().await.keys());
+						println!("all clients: {:?}", clients.lock().await.keys());
 
-							// TODO: DRY
-							// Send all stored messages to the client if any
-							if let Some(messages) = db.lock().await.get(client_id.clone()).await {
-								for (_, message) in messages {
-										if let Err(e) = tx.send(message.clone()) {
-												eprintln!(
-														"Error sending stored message to the writer task: {:?}",
-														e
-												);
-										}
-								}
+						// TODO: DRY
+						// Send all stored messages to the client if any
+						if let Some(messages) = db.lock().await.get(client_id.clone()).await {
+							for (_, message) in messages {
+									if let Err(e) = tx.send(message.clone()) {
+											eprintln!(
+													"Error sending stored message to the writer task: {:?}",
+													e
+											);
+									}
 							}
 						}
-						Message::Ping { .. } => {
-								last_ping_received = Instant::now();
-								let pong_msg = Message::Pong;
-								if let Err(e) = tx.send(pong_msg) {
-										eprintln!("Error sending Pong message to the writer task: {:?}", e);
-								}
+					}
+					Message::Ping { .. } => {
+						last_ping_received = Instant::now();
+						let pong_msg = Message::Pong;
+						if let Err(e) = tx.send(pong_msg) {
+								eprintln!("Error sending Pong message to the writer task: {:?}", e);
 						}
-						Message::Msg { sender, ts, payload, receiver } => {
-							// here, store the message in a db and send ServerAck
-							let msg = Message::Msg {
-								sender,
-								ts,
-								payload,
-								receiver: receiver.clone(),
-							};
+					}
+					Message::Msg { sender, ts, payload, receiver } => {
+						// here, store the message in a db and send ServerAck
+						let msg = Message::Msg {
+							sender,
+							ts,
+							payload,
+							receiver: receiver.clone(),
+						};
 
-							db.lock().await.save(&msg).await?;
+						db.lock().await.save(&msg).await?;
 
-							let ack_msg = Message::ServerAck { id: ts };
+						let ack_msg = Message::ServerAck { id: ts };
 
-							if let Err(e) = tx.send(ack_msg) {
-								eprintln!("Error sending ServerAck message to the writer task: {:?}", e);
-							}
+						if let Err(e) = tx.send(ack_msg) {
+							eprintln!("Error sending ServerAck message to the writer task: {:?}", e);
+						}
 
-							// FIXME: send this message instead?
-							if let Some(receiver_tx) = clients.lock().await.get(&receiver) {
-								// send all messages
-								if let Some(msgs) = db.lock().await.get(client_id.clone()).await {
-									for (_, msg) in msgs {
-										if let Err(e) = receiver_tx.send(msg.clone()) {
-												eprintln!("Error sending relayed message to the writer task: {:?}", e);
-										}
+						// FIXME: send this message instead?
+						if let Some(receiver_tx) = clients.lock().await.get(&receiver) {
+							// send all messages
+							if let Some(msgs) = db.lock().await.get(client_id.clone()).await {
+								for (_, msg) in msgs {
+									if let Err(e) = receiver_tx.send(msg.clone()) {
+											eprintln!("Error sending relayed message to the writer task: {:?}", e);
 									}
 								}
 							}
 						}
-						Message::ClientAck { id } => {
-							db.lock().await.remove(client_id.clone(), id).await;
-						}
+					}
+					Message::ClientAck { id } => {
+						db.lock().await.remove(client_id.clone(), id).await;
+					}
 					_ => (),
 				}
 			}
