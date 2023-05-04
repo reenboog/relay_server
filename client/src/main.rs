@@ -1,6 +1,5 @@
-use shared::{Message, Frame};
+use shared::{Frame, Message};
 
-use rand::Rng;
 use shared::serde_json;
 
 use std::error::Error;
@@ -23,26 +22,43 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 	let hello_msg = Frame::Hello {
 		user: client_id.to_string(),
 	};
-	let serialized_hello = serde_json::to_string(&hello_msg)?;
-	stream.write_all(serialized_hello.as_bytes()).await?;
+	let serialized_hello = serde_json::to_vec(&hello_msg)?;
+	stream.write_all(&[serialized_hello.as_slice(), b"\n"].concat()).await?;
 
+
+	// let mut stdin = BufReader::new(tokio::io::stdin());
+	// let mut std_in_buf = String::new();
 	let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-	let mut buffer = [0; 1024];
 
-	let mut stdin = BufReader::new(tokio::io::stdin());
-	let mut std_in_buf = String::new();
+	let users = vec!["aa", "bb", "cc", "dd"];
+
+	let mut msg_counter = 0;
+	let mut message_buffer = String::new();
 
 	loop {
-		tokio::select! {
-			// _ = interval.tick() => {
-			// 	let ping_msg = Frame::Ping { id: client_id.to_string() };
-			// 	let serialized_ping = serde_json::to_string(&ping_msg)?;
+		let mut buffer = [0; 1024];
 
-			// 	stream.write_all(serialized_ping.as_bytes()).await?
-			// }
+		tokio::select! {
+			_ = interval.tick() => {
+				use std::time::{SystemTime, UNIX_EPOCH};
+				use rand::Rng;
+
+				let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
+				let receivers: Vec<String> = users.iter().filter(|u| **u != client_id.to_string()).map(|u| u.to_string()).collect();
+				let receiver = receivers[rand::thread_rng().gen::<usize>() % receivers.len()].clone();
+				let payload = format!("{} -> {}: {}", client_id, receiver, msg_counter);
+				let msg = Frame::Msg { data: Message { ts, sender: client_id.to_string(), receiver, payload }};
+				let serialized = serde_json::to_vec(&msg)?;
+
+				msg_counter += 1;
+
+				stream.write_all(&[serialized.as_slice(), b"\n"].concat()).await?
+			}
 			result = stream.read(&mut buffer) => {
 				let n = match result {
-					Ok(n) => n,
+					Ok(n) => {
+						n
+					},
 					Err(e) => {
 						eprintln!("Error reading from the stream: {:?}", e);
 						break;
@@ -53,56 +69,39 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 					break;
 				}
 
-				let message: Frame = serde_json::from_slice(&buffer[..n])?;
-				match message {
-					Frame::Msg { data: Message { ts, sender, receiver, payload } } => {
-						if receiver == client_id {
-							println!("{}: {} {:?}", sender, ts, payload);
+				message_buffer.push_str(&String::from_utf8_lossy(&buffer[..n]));
+
+				while let Some(pos) = message_buffer.find('\n') {
+					let message_str = message_buffer[..pos].trim().to_owned();
+					message_buffer = message_buffer.split_off(pos + 1);
+
+					if message_str.is_empty() {
+							continue;
+					}
+
+					let message: Frame = match serde_json::from_str(&message_str) {
+						Ok(message) => message,
+						Err(e) => {
+							eprintln!("Error parsing message: {:?}", e);
+							continue;
 						}
-					}
-					// Frame::Left { id } => {
-					// 	println!("{} left", id);
-					// }
-					// Frame::Pong => {
-					// 	println!("Pong");
-					// }
-					// Frame::Status { ctx: _ } => {
-					// 	println!("Up");
-					// }
-					_ => (),
-				}
-			}
-			line = stdin.read_line(&mut std_in_buf) => {
-				let line = match line {
-					Ok(line) => line,
-					Err(e) => {
-						eprintln!("Error reading from stdin: {:?}", e);
-						break;
-					}
-				};
+					};
 
-				if line == 0 {
-					break;
+					match message {
+						Frame::Msg { data: Message { ts, sender, receiver, payload } } => {
+							if receiver == client_id {
+								println!("{}: {} {:?}", sender, ts, payload);
+							}
+
+							let ack = serde_json::to_vec(&Frame::ClientAck { ts })?;
+
+							stream.write_all(&ack).await?;
+						},
+						_ => (),
+					}
 				}
 
-				// let msg = if std_in_buf.to_string() == String::from("qq\n") {
-				// 	Frame::Quit { id: client_id.to_string() }
-				// } else {
-
-					let line = std_in_buf.splitn(2, " ").map(|s| s.to_string()).collect::<Vec<String>>();
-					let receiver = line[0].clone();
-					let payload = line[1].clone();
-
-					use std::time::{SystemTime, UNIX_EPOCH};
-
-					let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_millis() as u64;
-
-					let msg = Message { ts, sender: client_id.to_string(), receiver, payload };
-				// };
-
-				stream.write_all(serde_json::to_string(&Frame::Msg { data: msg })?.as_bytes()).await?;
-
-				std_in_buf.clear();
+				message_buffer.clear();
 			}
 		}
 	}
@@ -112,21 +111,33 @@ async fn run_client(addr: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-	let addr = "127.0.0.1:8080";
+	use std::env;
 
-	let mut stdin = BufReader::new(tokio::io::stdin());
-	let mut client_id = String::new();
+	let addr = "0.0.0.0:8080";
+	let args: Vec<String> = env::args().collect();
 
-	stdin.read_line(&mut client_id).await.unwrap();
-	client_id = client_id.replace("\n", "");
+
+	// let mut stdin = BufReader::new(tokio::io::stdin());
+	// let mut client_id = String::new();
+
+	// stdin.read_line(&mut client_id).await;
+
+	// client_id = client_id.replace("\n", "");
+	let client_id = args[1].clone();
 
 	println!("Hi, {}", client_id);
 
-	let client = tokio::spawn(async move {
-		run_client(addr, &client_id).await.unwrap();
-	});
+	_ = tokio::spawn(async move {
+		match run_client(addr, &client_id).await {
+			Ok(_) => todo!(),
+			Err(e) => {
+				eprintln!("Error running client: {}", e);
+			}
+		}
+	})
+	.await;
 
-	_ = tokio::join!(client);
+	// _ = tokio::join!(client);
 
 	Ok(())
 }
