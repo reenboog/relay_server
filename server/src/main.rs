@@ -74,6 +74,7 @@ async fn handle_connection(stream: TcpStream, db: Database, users: Users) {
 			Ok(n) => {
 				message_buffer.push_str(&String::from_utf8_lossy(&buf[..n]));
 
+				// serde messages are sent in one batch, so '\n' is used to distinguish one from another
 				while let Some(pos) = message_buffer.find('\n') {
 					let message_str = message_buffer[..pos].trim().to_owned();
 					message_buffer = message_buffer.split_off(pos + 1);
@@ -117,9 +118,11 @@ async fn on_db_write(
 		match req {
 			DbRequest::Save { msg } => {
 				db.lock().await.insert(msg.ts, msg.clone());
+				// Message could have a list of receivers instead
 				event_tx.send(Event::OnMsgStored { msg }).await.unwrap();
 			}
 			DbRequest::Remove { ts } => {
+				// this could remove `receiver` from the message's receivers list and, if the list is empty, remove the message
 				db.lock().await.remove(&ts);
 				event_tx.send(Event::OnMsgRemoved { ts }).await.unwrap();
 			}
